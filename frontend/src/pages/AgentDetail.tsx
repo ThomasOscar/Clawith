@@ -2320,9 +2320,6 @@ function AgentDetailInner() {
         const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
         const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
         const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
-        const resolvedSenderLabel = msg.sender_name || senderLabel;
-        const resolvedAvatarText = avatarText || (resolvedSenderLabel ? resolvedSenderLabel[0] : (isLeft ? 'A' : 'U'));
-        const showSenderLabel = !!resolvedSenderLabel && (forceSenderLabel || !!msg.sender_name);
 
         const resolvedAvatarText = avatarText ?? (isLeft ? (msg.sender_name ? msg.sender_name[0] : 'A') : 'U');
         const showSenderLabel = forceSenderLabel || (isLeft && msg.sender_name);
@@ -2378,7 +2375,7 @@ function AgentDetailInner() {
                 </div>
             </div>
         );
-    }), [t, senderLabel, avatarText, forceSenderLabel]);
+    }), [t]);
 
     const handleChatScroll = () => {
         const el = chatContainerRef.current;
