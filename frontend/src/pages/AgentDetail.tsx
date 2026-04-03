@@ -1859,10 +1859,17 @@ function AgentDetailInner() {
         return () => clearTimeout(timer);
     }, [historyMsgs, activeSession?.id]);
     // Memoized component for each chat message to avoid re-renders while typing
-    const ChatMessageItem = React.useMemo(() => React.memo(({ msg, i, isLeft, t }: { msg: any, i: number, isLeft: boolean, t: any }) => {
+    const ChatMessageItem = React.useMemo(() => React.memo(({ msg, i, isLeft, t, thisAgentName }: { msg: any, i: number, isLeft: boolean, t: any, thisAgentName?: string }) => {
         const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
         const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
         const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
+
+        // For A2A sessions, determine which participant is "this agent" (left side)
+        const resolvedAvatarText = isLeft
+            ? (thisAgentName && msg.sender_name === thisAgentName ? thisAgentName[0] : (msg.sender_name ? msg.sender_name[0] : 'A'))
+            : 'U';
+        const showSenderLabel = isLeft && msg.sender_name && msg.sender_name !== thisAgentName;
+        const resolvedSenderLabel = msg.sender_name;
 
         const timestampHtml = msg.timestamp ? (() => {
             const d = new Date(msg.timestamp);
@@ -1883,9 +1890,9 @@ function AgentDetailInner() {
 
         return (
             <div key={i} style={{ display: 'flex', flexDirection: isLeft ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: isLeft ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{isLeft ? (msg.sender_name ? msg.sender_name[0] : 'A') : 'U'}</div>
+                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: isLeft ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{resolvedAvatarText}</div>
                 <div style={{ maxWidth: '75%', padding: '8px 12px', borderRadius: '12px', background: isLeft ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
-                    {isLeft && msg.sender_name && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}><IconRobot size={12} stroke={1.5} /> {msg.sender_name}</div>}
+                    {showSenderLabel && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}><IconRobot size={12} stroke={1.5} /> {resolvedSenderLabel}</div>}
                     {isImage ? (
                         <div style={{ marginBottom: '4px' }}>
                             <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} loading="lazy" />
@@ -1914,7 +1921,7 @@ function AgentDetailInner() {
                 </div>
             </div>
         );
-    }), [t]);
+    }), [t, thisAgentName]);
 
     const handleChatScroll = () => {
         const el = chatContainerRef.current;
@@ -3932,7 +3939,7 @@ function AgentDetailInner() {
                                                         return null;
                                                     }
                                                     return (
-                                                        <ChatMessageItem key={i} msg={m} i={i} isLeft={isLeft} t={t} />
+                                                        <ChatMessageItem key={i} msg={m} i={i} isLeft={isLeft} t={t} thisAgentName={thisAgentName} />
                                                     );
                                                 });
                                             })()}
@@ -3997,7 +4004,7 @@ function AgentDetailInner() {
                                                     return null;
                                                 }
                                                 return (
-                                                    <ChatMessageItem key={i} msg={msg} i={i} isLeft={msg.role === 'assistant'} t={t} />
+                                                    <ChatMessageItem key={i} msg={msg} i={i} isLeft={msg.role === 'assistant'} t={t} thisAgentName={agent?.name} />
                                                 );
                                             })}
                                             {isWaiting && (
