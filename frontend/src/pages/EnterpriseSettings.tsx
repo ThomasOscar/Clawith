@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { IconTrash, IconPlug, IconRobot } from '@tabler/icons-react';
 import { enterpriseApi, skillApi } from '../services/api';
 import { useAuthStore } from '../stores';
 import PromptModal from '../components/PromptModal';
@@ -2785,7 +2786,7 @@ export default function EnterpriseSettings() {
                                                         style={{ color: 'var(--error)', fontSize: '12px', padding: '4px 12px' }}
                                                         onClick={() => setBulkDeleteConfirm(selectedToolIds.size)}
                                                     >
-                                                        🗑️ {t('enterprise.tools.bulkDelete')}
+                                                        <IconTrash size={14} stroke={1.5} style={{ marginRight: '4px' }} /> {t('enterprise.tools.bulkDelete')}
                                                     </button>
                                                 </div>
                                             ) : (
@@ -2829,16 +2830,16 @@ export default function EnterpriseSettings() {
                                                         </label>
                                                         <div style={{ flex: 1, minWidth: 0 }}>
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                <span style={{ fontWeight: 500, fontSize: '13px' }}>🔌 {row.tool_display_name}</span>
+                                                                <span style={{ fontWeight: 500, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '4px' }}><IconPlug size={14} stroke={1.5} /> {row.tool_display_name}</span>
                                                                 {row.mcp_server_name && <span style={{ fontSize: '10px', background: 'var(--primary)', color: '#fff', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>}
                                                             </div>
                                                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                                🤖 {row.installed_by_agent_name || 'Unknown Agent'}
+                                                                <IconRobot size={12} stroke={1.5} style={{ marginRight: '2px', verticalAlign: 'middle' }} /> {row.installed_by_agent_name || 'Unknown Agent'}
                                                                 {row.installed_at && <span> · {new Date(row.installed_at).toLocaleString()}</span>}
                                                             </div>
                                                         </div>
                                                     </div>
-                                                    <button className="btn btn-ghost" style={{ color: 'var(--error)', fontSize: '12px' }} onClick={() => setSingleDeleteConfirm({ agentToolId: row.agent_tool_id, name: row.tool_display_name })}>🗑️ {t('enterprise.tools.delete')}</button>
+                                                    <button className="btn btn-ghost" style={{ color: 'var(--error)', fontSize: '12px' }} onClick={() => setSingleDeleteConfirm({ agentToolId: row.agent_tool_id, name: row.tool_display_name })}><IconTrash size={14} stroke={1.5} style={{ marginRight: '4px' }} /> {t('enterprise.tools.delete')}</button>
                                                 </div>
                                             ))}
                                         </div>

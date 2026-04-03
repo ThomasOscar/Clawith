@@ -466,7 +466,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                     style={{ color: 'var(--error)', fontSize: '12px', padding: '4px 12px' }}
                                     onClick={() => setBulkDeleteConfirm(selectedToolIds.size)}
                                 >
-                                    🗑️ {t('agent.tools.bulkDelete', '批量删除')}
+                                    <IconTrash size={14} stroke={1.5} style={{ marginRight: '4px' }} /> {t('agent.tools.bulkDelete', 'Bulk Delete')}
                                 </button>
                             </div>
                         ) : (
@@ -3707,7 +3707,7 @@ function AgentDetailInner() {
                                                             }} />
                                                             <div style={{ flex: 1, minWidth: 0 }}>
                                                                 <div style={{ fontSize: '12px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                                    {(session.title || 'Trigger execution').replace(/^🤖\s*/, '')}
+                                                                    {(session.title || 'Trigger execution').replace(/^.?\s*/, '')}
                                                                 </div>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '1px' }}>
                                                                     {new Date(session.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
@@ -4492,7 +4492,7 @@ function AgentDetailInner() {
                                                 pointerEvents: 'none',
                                             }}
                                         >
-                                            {activeSession.source_channel === 'agent' ? `🤖 Agent Conversation · ${activeSession.username || 'Agents'}` : `Read-only · ${activeSession.username || 'User'}`}
+                                            {activeSession.source_channel === 'agent' ? <><IconRobot size={12} stroke={1.5} style={{ marginRight: '4px', verticalAlign: 'middle' }} /> Agent Conversation · {activeSession.username || 'Agents'}</> : `Read-only · ${activeSession.username || 'User'}`}
                                         </div>
                                         <div ref={historyContainerRef} onScroll={handleHistoryScroll} style={{ flex: 1, overflowY: 'auto', padding: '48px 16px 12px' }}>
                                             {(() => {
@@ -4975,11 +4975,19 @@ function AgentDetailInner() {
                                 {filteredLogs.length > 0 ? (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                         {filteredLogs.map((log: any) => {
-                                            const icons: Record<string, string> = {
-                                                chat_reply: '💬', tool_call: '⚡', feishu_msg_sent: '📤',
-                                                agent_msg_sent: '🤖', web_msg_sent: '🌐', task_created: '📋',
-                                                task_updated: '✅', file_written: '📝', error: '❌',
-                                                schedule_run: '⏰', heartbeat: '💓', plaza_post: '🏛️',
+                                            const iconComponents: Record<string, React.ReactNode> = {
+                                                chat_reply: <IconMessage size={12} stroke={1.5} />,
+                                                tool_call: <IconBolt size={12} stroke={1.5} />,
+                                                feishu_msg_sent: <IconSend2 size={12} stroke={1.5} />,
+                                                agent_msg_sent: <IconRobot size={12} stroke={1.5} />,
+                                                web_msg_sent: <IconPlug size={12} stroke={1.5} />,
+                                                task_created: <IconFileText size={12} stroke={1.5} />,
+                                                task_updated: <IconFileText size={12} stroke={1.5} />,
+                                                file_written: <IconFileText size={12} stroke={1.5} />,
+                                                error: <IconAlertCircle size={12} stroke={1.5} />,
+                                                schedule_run: <IconClock size={12} stroke={1.5} />,
+                                                heartbeat: <IconHeart size={12} stroke={1.5} />,
+                                                plaza_post: <IconBuildingArch size={12} stroke={1.5} />,
                                             };
                                             const time = log.created_at ? new Date(log.created_at).toLocaleString('zh-CN', {
                                                 month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -4996,8 +5004,8 @@ function AgentDetailInner() {
                                                     }}
                                                 >
                                                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                                                        <span style={{ fontSize: '16px', flexShrink: 0, marginTop: '1px' }}>
-                                                            {icons[log.action_type] || '·'}
+                                                        <span style={{ flexShrink: 0, marginTop: '1px', display: 'flex', alignItems: 'center', color: 'var(--text-secondary)' }}>
+                                                            {iconComponents[log.action_type] || '·'}
                                                         </span>
                                                         <div style={{ flex: 1, minWidth: 0 }}>
                                                             <div style={{ fontWeight: 500, marginBottom: '2px' }}>{log.summary}</div>
