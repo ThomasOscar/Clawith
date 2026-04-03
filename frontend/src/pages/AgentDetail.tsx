@@ -1859,17 +1859,24 @@ function AgentDetailInner() {
         return () => clearTimeout(timer);
     }, [historyMsgs, activeSession?.id]);
     // Memoized component for each chat message to avoid re-renders while typing
-    const ChatMessageItem = React.useMemo(() => React.memo(({ msg, i, isLeft, t, thisAgentName }: { msg: any, i: number, isLeft: boolean, t: any, thisAgentName?: string }) => {
+    const ChatMessageItem = React.useMemo(() => React.memo(({
+        msg, i, isLeft, t, senderLabel, avatarText, forceSenderLabel = false,
+    }: {
+        msg: any;
+        i: number;
+        isLeft: boolean;
+        t: any;
+        senderLabel?: string;
+        avatarText?: string;
+        forceSenderLabel?: boolean;
+    }) => {
         const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
         const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
         const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
 
-        // For A2A sessions, determine which participant is "this agent" (left side)
-        const resolvedAvatarText = isLeft
-            ? (thisAgentName && msg.sender_name === thisAgentName ? thisAgentName[0] : (msg.sender_name ? msg.sender_name[0] : 'A'))
-            : 'U';
-        const showSenderLabel = isLeft && msg.sender_name && msg.sender_name !== thisAgentName;
-        const resolvedSenderLabel = msg.sender_name;
+        const finalAvatarText = avatarText ?? (isLeft ? (msg.sender_name ? msg.sender_name[0] : 'A') : 'U');
+        const showSenderLabel = forceSenderLabel || (isLeft && msg.sender_name);
+        const finalSenderLabel = senderLabel ?? msg.sender_name;
 
         const timestampHtml = msg.timestamp ? (() => {
             const d = new Date(msg.timestamp);
@@ -1890,9 +1897,9 @@ function AgentDetailInner() {
 
         return (
             <div key={i} style={{ display: 'flex', flexDirection: isLeft ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: isLeft ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{resolvedAvatarText}</div>
+                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: isLeft ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{finalAvatarText}</div>
                 <div style={{ maxWidth: '75%', padding: '8px 12px', borderRadius: '12px', background: isLeft ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
-                    {showSenderLabel && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}><IconRobot size={12} stroke={1.5} /> {resolvedSenderLabel}</div>}
+                    {showSenderLabel && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}><IconRobot size={12} stroke={1.5} /> {finalSenderLabel}</div>}
                     {isImage ? (
                         <div style={{ marginBottom: '4px' }}>
                             <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} loading="lazy" />
@@ -1921,7 +1928,7 @@ function AgentDetailInner() {
                 </div>
             </div>
         );
-    }), [t, thisAgentName]);
+    }), [t, senderLabel, avatarText, forceSenderLabel]);
 
     const handleChatScroll = () => {
         const el = chatContainerRef.current;
@@ -3939,7 +3946,16 @@ function AgentDetailInner() {
                                                         return null;
                                                     }
                                                     return (
-                                                        <ChatMessageItem key={i} msg={m} i={i} isLeft={isLeft} t={t} thisAgentName={thisAgentName} />
+                                                        <ChatMessageItem
+                                                            key={i}
+                                                            msg={m}
+                                                            i={i}
+                                                            isLeft={isLeft}
+                                                            t={t}
+                                                            senderLabel={isA2A && m.sender_name && m.sender_name !== thisAgentName ? m.sender_name : undefined}
+                                                            avatarText={isLeft ? (m.sender_name ? m.sender_name[0] : 'A') : 'U'}
+                                                            forceSenderLabel={isA2A && !!m.sender_name && m.sender_name !== thisAgentName}
+                                                        />
                                                     );
                                                 });
                                             })()}
@@ -4004,7 +4020,7 @@ function AgentDetailInner() {
                                                     return null;
                                                 }
                                                 return (
-                                                    <ChatMessageItem key={i} msg={msg} i={i} isLeft={msg.role === 'assistant'} t={t} thisAgentName={agent?.name} />
+                                                    <ChatMessageItem key={i} msg={msg} i={i} isLeft={msg.role === 'assistant'} t={t} />
                                                 );
                                             })}
                                             {isWaiting && (
