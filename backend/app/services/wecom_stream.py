@@ -6,7 +6,7 @@ No callback URL or domain verification needed.
 
 import asyncio
 import uuid
-from typing import Dict
+from typing import Dict, Tuple
 
 from loguru import logger
 from sqlalchemy import select
@@ -16,43 +16,48 @@ from app.models.channel_config import ChannelConfig
 
 
 class WeComStreamManager:
-    """Manages WeCom AI Bot WebSocket clients for all agents."""
+    """Manages WeCom AI Bot WebSocket clients for all agents and accounts."""
 
     def __init__(self):
-        self._clients: Dict[uuid.UUID, object] = {}
-        self._tasks: Dict[uuid.UUID, asyncio.Task] = {}
+        # Use (agent_id, account_id) tuple as key for multi-account support
+        self._clients: Dict[Tuple[uuid.UUID, str], object] = {}
+        self._tasks: Dict[Tuple[uuid.UUID, str], asyncio.Task] = {}
 
     async def start_client(
         self,
         agent_id: uuid.UUID,
+        account_id: str,
         bot_id: str,
         bot_secret: str,
         stop_existing: bool = True,
     ):
-        """Start a WeCom AI Bot WebSocket client for a specific agent."""
+        """Start a WeCom AI Bot WebSocket client for a specific agent and account."""
         if not bot_id or not bot_secret:
-            logger.warning(f"[WeCom Stream] Missing bot_id or bot_secret for {agent_id}, skipping")
+            logger.warning(f"[WeCom Stream] Missing bot_id or bot_secret for {agent_id}, account {account_id}, skipping")
             return
 
-        logger.info(f"[WeCom Stream] Starting client for agent {agent_id} (BotID: {bot_id[:12]}...)")
+        logger.info(f"[WeCom Stream] Starting client for agent {agent_id}, account {account_id} (BotID: {bot_id[:12]}...)")
 
         # Stop existing client if any
         if stop_existing:
-            await self.stop_client(agent_id)
+            await self.stop_client(agent_id, account_id)
 
         task = asyncio.create_task(
-            self._run_client(agent_id, bot_id, bot_secret),
-            name=f"wecom-stream-{str(agent_id)[:8]}",
+            self._run_client(agent_id, account_id, bot_id, bot_secret),
+            name=f"wecom-stream-{str(agent_id)[:8]}-{account_id}",
         )
-        self._tasks[agent_id] = task
+        self._tasks[(agent_id, account_id)] = task
 
     async def _run_client(
         self,
         agent_id: uuid.UUID,
+        account_id: str,
         bot_id: str,
         bot_secret: str,
     ):
         """Run the WeCom WebSocket client (async, runs in the main event loop)."""
+        client_key = (agent_id, account_id)
+        
         try:
             from wecom_aibot_sdk import WSClient, generate_req_id
         except ImportError:
@@ -69,7 +74,7 @@ class WeComStreamManager:
                 "max_reconnect_attempts": -1,  # infinite reconnect
                 "heartbeat_interval": 30000,   # 30s heartbeat
             })
-            self._clients[agent_id] = client
+            self._clients[client_key] = client
 
             # ── Message handler: text ──
             async def on_text(frame):
@@ -91,12 +96,13 @@ class WeComStreamManager:
                     logger.info(
                         f"[WeCom Stream] Text from {sender_id}, "
                         f"is_group={is_group_msg}, chat_id={chat_id or 'N/A'}, "
-                        f"body_keys={list(body.keys())}: {user_text[:80]}"
+                        f"account={account_id}, body_keys={list(body.keys())}: {user_text[:80]}"
                     )
 
                     # Process message and get reply
                     reply_text = await _process_wecom_stream_message(
                         agent_id=agent_id,
+                        account_id=account_id,
                         sender_id=sender_id,
                         user_text=user_text,
                         chat_id=chat_id,
@@ -200,27 +206,28 @@ class WeComStreamManager:
                 retry_delay = min(retry_delay * 2, max_retry_delay)
 
         except asyncio.CancelledError:
-            logger.info(f"[WeCom Stream] Client task cancelled for agent {agent_id}")
-            if agent_id in self._clients:
+            logger.info(f"[WeCom Stream] Client task cancelled for agent {agent_id}, account {account_id}")
+            if client_key in self._clients:
                 try:
-                    await self._clients[agent_id].disconnect()
+                    await self._clients[client_key].disconnect()
                 except Exception:
                     pass
         except Exception as e:
-            logger.error(f"[WeCom Stream] Fatal client error for {agent_id}: {e}")
+            logger.error(f"[WeCom Stream] Fatal client error for {agent_id}, account {account_id}: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            self._clients.pop(agent_id, None)
-            self._tasks.pop(agent_id, None)
+            self._clients.pop(client_key, None)
+            self._tasks.pop(client_key, None)
 
-    async def stop_client(self, agent_id: uuid.UUID):
-        """Stop a running WebSocket client for an agent."""
-        task = self._tasks.pop(agent_id, None)
+    async def stop_client(self, agent_id: uuid.UUID, account_id: str = "default"):
+        """Stop a running WebSocket client for an agent and account."""
+        key = (agent_id, account_id)
+        task = self._tasks.pop(key, None)
         if task and not task.done():
             task.cancel()
-            logger.info(f"[WeCom Stream] Stopped client for agent {agent_id}")
-        client = self._clients.pop(agent_id, None)
+            logger.info(f"[WeCom Stream] Stopped client for agent {agent_id}, account {account_id}")
+        client = self._clients.pop(key, None)
         if client:
             try:
                 await client.disconnect()
@@ -228,7 +235,7 @@ class WeComStreamManager:
                 pass
 
     async def start_all(self):
-        """Start WebSocket clients for all configured WeCom agents with bot credentials."""
+        """Start WebSocket clients for all configured WeCom accounts with bot credentials."""
         logger.info("[WeCom Stream] Initializing all active WeCom AI Bot channels...")
         async with async_session() as db:
             result = await db.execute(
@@ -239,25 +246,59 @@ class WeComStreamManager:
             )
             configs = result.scalars().all()
 
+            # Extract all account configs before session closes to avoid lazy loading issues
+            account_configs = []
+            for config in configs:
+                extra = config.extra_config or {}
+                accounts = extra.get("accounts", {})
+
+                # New multi-account format with nested bot/agent structure
+                if accounts:
+                    for account_id, account_config in accounts.items():
+                        # Check if bot_websocket mode is enabled
+                        if account_config.get("bot_websocket_enabled", False):
+                            bot_config = account_config.get("bot", {})
+                            bot_id = bot_config.get("id", "").strip()
+                            bot_secret = bot_config.get("secret", "").strip()
+                            if bot_id and bot_secret:
+                                account_configs.append({
+                                    "agent_id": config.agent_id,
+                                    "account_id": account_id,
+                                    "bot_id": bot_id,
+                                    "bot_secret": bot_secret,
+                                })
+                else:
+                    # Legacy single-account format - migrate on the fly
+                    connection_mode = extra.get("connection_mode", "websocket")
+                    if connection_mode == "websocket":
+                        bot_id = extra.get("bot_id", "").strip()
+                        bot_secret = extra.get("bot_secret", "").strip()
+                        if bot_id and bot_secret:
+                            account_configs.append({
+                                "agent_id": config.agent_id,
+                                "account_id": "default",
+                                "bot_id": bot_id,
+                                "bot_secret": bot_secret,
+                            })
+
         started = 0
-        for config in configs:
-            extra = config.extra_config or {}
-            bot_id = extra.get("bot_id", "")
-            bot_secret = extra.get("bot_secret", "")
-            if bot_id and bot_secret:
-                await self.start_client(
-                    config.agent_id, bot_id, bot_secret,
-                    stop_existing=False,
-                )
-                started += 1
+        for cfg in account_configs:
+            await self.start_client(
+                cfg["agent_id"],
+                cfg["account_id"],
+                cfg["bot_id"],
+                cfg["bot_secret"],
+                stop_existing=False,
+            )
+            started += 1
 
         logger.info(f"[WeCom Stream] Started {started} WeCom AI Bot client(s)")
 
     def status(self) -> dict:
         """Return status of all active WebSocket clients."""
         return {
-            str(aid): not self._tasks[aid].done()
-            for aid in self._tasks
+            f"{agent_id}:{account_id}": not self._tasks[(agent_id, account_id)].done()
+            for (agent_id, account_id) in self._tasks.keys()
         }
 
 
@@ -269,6 +310,7 @@ async def _process_wecom_stream_message(
     user_text: str,
     chat_id: str = "",
     is_group: bool = False,
+    account_id: str = "default",
 ) -> str:
     """Process a WeCom message through the LLM pipeline and return the reply text."""
     from datetime import datetime, timezone
@@ -290,12 +332,13 @@ async def _process_wecom_stream_message(
         from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
         ctx_size = agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE
 
-        # Conversation ID: differentiate single chat vs group chat
+        # Conversation ID: differentiate single chat vs group chat, include account_id
         # Group detection is based on chatid presence, not chattype (SDK bug)
+        account_suffix = f"_{account_id}" if account_id != "default" else ""
         if is_group and chat_id:
-            conv_id = f"wecom_group_{chat_id}"
+            conv_id = f"wecom_group_{chat_id}{account_suffix}"
         else:
-            conv_id = f"wecom_p2p_{sender_id}"
+            conv_id = f"wecom_p2p_{sender_id}{account_suffix}"
 
         # Resolve or create platform user via unified channel user service.
         # This correctly handles the User/Identity model relationship
