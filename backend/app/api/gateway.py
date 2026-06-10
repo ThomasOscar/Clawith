@@ -6,16 +6,16 @@ to poll for messages, report results, send messages, and send heartbeat pings.
 
 import asyncio
 import hashlib
-import secrets
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Header, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, Depends
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
+from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
 from app.models.agent import Agent
 from app.models.gateway_message import GatewayMessage
 from app.models.user import User
@@ -57,42 +57,6 @@ async def _get_agent_by_key(api_key: str, db: AsyncSession) -> Agent:
     if not agent:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return agent
-
-
-# ─── Generate / Regenerate API Key ──────────────────────
-
-@router.post("/generate-key/{agent_id}")
-async def generate_api_key(
-    agent_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    # JWT auth for this endpoint (requires the agent creator)
-    current_user: "User" = Depends(None),  # placeholder, will use real dependency
-):
-    """Generate or regenerate an API key for an OpenClaw agent.
-
-    Called from the frontend by the agent creator.
-    """
-    from app.api.agents import get_current_user
-    raise HTTPException(status_code=501, detail="Use the /agents/{id}/api-key endpoint instead")
-
-
-@router.post("/agents/{agent_id}/api-key")
-async def generate_agent_api_key(agent_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Generate or regenerate API key for an OpenClaw agent.
-
-    This is an internal endpoint called by the agents API.
-    """
-    result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.agent_type == "openclaw"))
-    agent = result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="OpenClaw agent not found")
-
-    # Generate a new key
-    raw_key = f"oc-{secrets.token_urlsafe(32)}"
-    agent.api_key_hash = _hash_key(raw_key)
-    await db.commit()
-
-    return {"api_key": raw_key, "message": "Save this key — it won't be shown again."}
 
 
 # ─── Poll for messages ──────────────────────────────────
@@ -189,7 +153,8 @@ async def poll_messages(
         .options(selectinload(AgentRelationship.member))
     )
     for r in h_result.scalars().all():
-        if r.member:
+        status_info = await evaluate_human_relationship_status(db, r, source_agent=agent)
+        if r.member and status_info["access_status"] == "active":
             channels = []
             if getattr(r.member, 'external_id', None) or getattr(r.member, 'open_id', None):
                 channels.append("feishu")
@@ -210,7 +175,8 @@ async def poll_messages(
         .options(selectinload(AgentAgentRelationship.target_agent))
     )
     for r in a_result.scalars().all():
-        if r.target_agent:
+        status_info = await evaluate_agent_relationship_status(db, r)
+        if r.target_agent and status_info["access_status"] == "active":
             rel_items.append(GatewayRelationshipItem(
                 name=r.target_agent.name,
                 type="agent",
@@ -343,7 +309,7 @@ async def _send_to_agent_background(
     """
     logger.info(f"[Gateway] _send_to_agent_background started: {source_agent_name} -> {target_agent_name}")
     try:
-        from app.api.websocket import call_llm
+        from app.services.llm import call_llm
         from app.models.llm import LLMModel
         from app.models.audit import ChatMessage
         from app.models.chat_session import ChatSession
@@ -426,9 +392,8 @@ async def _send_to_agent_background(
             )
             hist_msgs = list(reversed(hist_result.scalars().all()))
 
-            messages = []
-            for h in hist_msgs:
-                messages.append({"role": h.role, "content": h.content or ""})
+            from app.services.llm.utils import convert_chat_messages_to_llm_format as _conv
+            messages = _conv(hist_msgs)
 
             # Add the new message with agent communication context
             user_msg = f"{agent_comm_alert}\n\n[Message from agent: {source_agent_name}]\n{content}"
@@ -465,6 +430,7 @@ async def _send_to_agent_background(
             role_description=target_role_description,
             agent_id=target_agent_id,
             user_id=target_creator_id,
+            session_id=conv_id,
             on_chunk=on_chunk,
         )
         final_reply = reply or "".join(collected)
@@ -522,11 +488,26 @@ async def send_message(
     content = body.content.strip()
     channel_hint = (body.channel or "").strip().lower()
 
-    # 1. Try to find target as another Agent
-    result = await db.execute(
-        select(Agent).where(Agent.name.ilike(f"%{target_name}%"))
+    # 1. Try to find target as another Agent, limited to active relationships.
+    from app.models.org import AgentAgentRelationship
+    from sqlalchemy.orm import selectinload
+
+    rel_result = await db.execute(
+        select(AgentAgentRelationship)
+        .where(AgentAgentRelationship.agent_id == agent.id)
+        .options(selectinload(AgentAgentRelationship.target_agent))
     )
-    target_agent = result.scalars().first()
+    target_agent = None
+    for rel in rel_result.scalars().all():
+        candidate = rel.target_agent
+        if not candidate:
+            continue
+        status_info = await evaluate_agent_relationship_status(db, rel)
+        if status_info["access_status"] != "active":
+            continue
+        if candidate.name.lower() == target_name.lower() or target_name.lower() in candidate.name.lower():
+            target_agent = candidate
+            break
 
     logger.info(f"[Gateway] send_message: target='{target_name}', found_agent={target_agent.name if target_agent else None}, agent_type={getattr(target_agent, 'agent_type', None) if target_agent else None}, channel_hint='{channel_hint}'")
 
@@ -587,13 +568,15 @@ async def send_message(
 
     target_member = None
     for r in rels:
-        if r.member and r.member.name == target_name:
+        status_info = await evaluate_human_relationship_status(db, r, source_agent=agent)
+        if r.member and status_info["access_status"] == "active" and r.member.name == target_name:
             target_member = r.member
             break
     # Fuzzy match if exact match fails
     if not target_member:
         for r in rels:
-            if r.member and target_name.lower() in r.member.name.lower():
+            status_info = await evaluate_human_relationship_status(db, r, source_agent=agent)
+            if r.member and status_info["access_status"] == "active" and target_name.lower() in r.member.name.lower():
                 target_member = r.member
                 break
 
@@ -625,11 +608,17 @@ async def send_message(
             await db.commit()
             raise HTTPException(status_code=400, detail="No Feishu channel configured")
 
+        # Extract config values and release connection before Feishu HTTP calls
+        _cfg_app_id = config.app_id
+        _cfg_app_secret = config.app_secret
+        await db.commit()
+        await db.close()
+
         # Prefer user_id (tenant-stable, works across apps), fallback to open_id
         resp = None
         if target_member.external_id:
             resp = await feishu_service.send_message(
-                config.app_id, config.app_secret,
+                _cfg_app_id, _cfg_app_secret,
                 receive_id=target_member.external_id,
                 msg_type="text",
                 content=_json.dumps({"text": content}, ensure_ascii=False),
@@ -637,13 +626,12 @@ async def send_message(
             )
         if (resp is None or resp.get("code") != 0) and target_member.open_id:
             resp = await feishu_service.send_message(
-                config.app_id, config.app_secret,
+                _cfg_app_id, _cfg_app_secret,
                 receive_id=target_member.open_id,
                 msg_type="text",
                 content=_json.dumps({"text": content}, ensure_ascii=False),
                 receive_id_type="open_id",
             )
-        await db.commit()
 
         if resp and resp.get("code") == 0:
             return {

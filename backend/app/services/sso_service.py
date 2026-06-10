@@ -8,12 +8,14 @@ import uuid
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.models.identity import IdentityProvider
+from app.models.identity import AuthProviderType, IdentityProvider
 from app.models.tenant import Tenant
 from app.models.user import Identity, User
+from app.services.identity_provider_lookup import get_preferred_identity_provider
 from app.services.platform_service import platform_service
 
 
@@ -24,7 +26,7 @@ class SSOService:
     DOMAIN_TENANT_HINTS: dict[str, str] = {}
 
     async def match_user_by_email(
-        self, db: AsyncSession, email: str, tenant_id: str | None = None
+        self, db: AsyncSession, email: str, tenant_id: str
     ) -> User | None:
         """Find existing user by email address.
 
@@ -40,31 +42,48 @@ class SSOService:
         query = (
             select(User)
             .join(User.identity)
-            .where(Identity.email == email)
+            .where(
+                Identity.email == email,
+                User.is_active == True,
+            )
+            .options(selectinload(User.identity))
         )
         if tenant_id:
             query = query.where(User.tenant_id == tenant_id)
-        
+        else:
+            query = query.where(User.tenant_id.is_(None))
+
         result = await db.execute(query)
-        user = result.scalar_one_or_none()
-        
+        user = result.scalars().first()
+
         if user:
             return user
-            
-        # 2. If not found and tenant_id is provided, try to find an Identity
+
+        # 2. If not found, try to find an Identity and match within the tenant scope
         if email:
             id_query = select(Identity).where(Identity.email == email)
             id_result = await db.execute(id_query)
             identity = id_result.scalar_one_or_none()
             if identity:
                 # Find any user for this identity (representative)
-                u_res = await db.execute(select(User).where(User.identity_id == identity.id).limit(1))
+                u_query = (
+                    select(User)
+                    .where(
+                        User.identity_id == identity.id,
+                        User.is_active == True,
+                    )
+                    .options(selectinload(User.identity))
+                    .limit(1)
+                )
+                if tenant_id:
+                    u_query = u_query.where(User.tenant_id == tenant_id)
+                u_res = await db.execute(u_query)
                 return u_res.scalar_one_or_none()
-                
+
         return None
 
     async def match_user_by_mobile(
-        self, db: AsyncSession, mobile: str, tenant_id: str | None = None
+        self, db: AsyncSession, mobile: str, tenant_id: str
     ) -> User | None:
         """Find existing user by mobile phone number.
 
@@ -85,13 +104,17 @@ class SSOService:
         query = (
             select(User)
             .join(User.identity)
-            .where(Identity.phone == normalized_mobile)
+            .where(
+                Identity.phone == normalized_mobile,
+                User.is_active == True,
+            )
+            .options(selectinload(User.identity))
         )
         if tenant_id:
             query = query.where(User.tenant_id == tenant_id)
-            
+
         result = await db.execute(query)
-        user = result.scalar_one_or_none()
+        user = result.scalars().first()
         if user:
             return user
 
@@ -100,8 +123,19 @@ class SSOService:
         id_result = await db.execute(id_query)
         identity = id_result.scalar_one_or_none()
         if identity:
-             u_res = await db.execute(select(User).where(User.identity_id == identity.id).limit(1))
-             return u_res.scalar_one_or_none()
+            u_query = (
+                select(User)
+                .where(
+                    User.identity_id == identity.id,
+                    User.is_active == True,
+                )
+                .options(selectinload(User.identity))
+                .limit(1)
+            )
+
+            u_query = u_query.where(User.tenant_id == tenant_id)
+            u_res = await db.execute(u_query)
+            return u_res.scalar_one_or_none()
 
         return None
 
@@ -147,7 +181,12 @@ class SSOService:
         return None
 
     async def resolve_user_identity(
-        self, db: AsyncSession, provider_user_id: str, provider_type: str, tenant_id: str | None = None
+        self,
+        db: AsyncSession,
+        provider_user_id: str,
+        provider_type: AuthProviderType | str,
+        tenant_id: str | None = None,
+        identity_data: dict[str, Any] | None = None,
     ) -> User | None:
         """Resolve user from external identity via OrgMember.
 
@@ -160,32 +199,20 @@ class SSOService:
         Returns:
             User if found via OrgMember, None otherwise
         """
-        from app.models.org import OrgMember
 
         # Get provider
-        query = select(IdentityProvider).where(IdentityProvider.provider_type == provider_type)
-        if tenant_id:
-            query = query.where(IdentityProvider.tenant_id == tenant_id)
-            
-        result = await db.execute(query)
-        provider = result.scalar_one_or_none()
+        provider = await get_preferred_identity_provider(db, provider_type, tenant_id)
 
         if not provider:
             return None
 
-        # Find OrgMember by unionid, external_id, or open_id
-        # For Feishu/DingTalk we often use unionid, for WeCom we use external_id (userid)
-        member_query = select(OrgMember).where(
-            OrgMember.provider_id == provider.id,
-            OrgMember.status == "active",
-            or_(
-                OrgMember.unionid == provider_user_id,
-                OrgMember.external_id == provider_user_id,
-                OrgMember.open_id == provider_user_id
-            )
+        member = await self._find_identity_member(
+            db,
+            provider.id,
+            provider_type,
+            provider_user_id,
+            identity_data,
         )
-        member_result = await db.execute(member_query)
-        member = member_result.scalar_one_or_none()
 
         if not member or not member.user_id:
             return None
@@ -197,11 +224,112 @@ class SSOService:
         )
         return user_result.scalar_one_or_none()
 
+    def _get_identity_payload(self, identity_data: dict[str, Any] | None) -> dict[str, Any]:
+        if not identity_data:
+            return {}
+        raw_data = identity_data.get("raw_data")
+        if isinstance(raw_data, dict):
+            return raw_data
+        return identity_data
+
+    def _extract_identity_ids(
+        self,
+        provider_type: AuthProviderType | str,
+        provider_user_id: str,
+        identity_data: dict[str, Any] | None,
+    ) -> tuple[str | None, str | None, str | None]:
+        payload = self._get_identity_payload(identity_data)
+        identity_data = identity_data or {}
+
+        raw_open_id = (
+            payload.get("open_id")
+            or payload.get("openId")
+            or identity_data.get("open_id")
+            or identity_data.get("openId")
+        )
+        raw_union_id = (
+            payload.get("union_id")
+            or payload.get("unionId")
+            or identity_data.get("union_id")
+            or identity_data.get("unionId")
+        )
+
+        external_id = None
+        if provider_type == "feishu":
+            # payload.get() only works when provider_user_id is a JSON string.
+            # For SSO path, provider_user_id=None so payload={}, but identity_data
+            # (raw SSO response) always contains the stable user_id.
+            external_id = payload.get("user_id") or (identity_data or {}).get("user_id")
+        elif provider_type == "dingtalk":
+            external_id = (
+                payload.get("userid") or payload.get("staffId")
+                or (identity_data or {}).get("userid") or (identity_data or {}).get("staffId")
+            )
+        elif provider_type == "wecom":
+            external_id = provider_user_id
+
+        open_id = (raw_open_id or "").strip() or None
+        union_id = (raw_union_id or "").strip() or None
+        external_id = (external_id or "").strip() or None
+        return union_id, open_id, external_id
+
+    def _identity_lookup_chain(
+        self,
+        provider_type: AuthProviderType | str,
+        provider_user_id: str,
+        identity_data: dict[str, Any] | None,
+    ) -> list[tuple[str, str]]:
+        raw_union_id, raw_open_id, raw_external_id = self._extract_identity_ids(
+            provider_type, provider_user_id, identity_data
+        )
+
+        lookup_chain: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(field: str, value: str | None) -> None:
+            normalized = (value or "").strip()
+            key = (field, normalized)
+            if not normalized or key in seen:
+                return
+            seen.add(key)
+            lookup_chain.append(key)
+
+        add("unionid", raw_union_id)
+        add("external_id", raw_external_id)
+        add("open_id", raw_open_id)
+        
+        return lookup_chain
+
+    async def _find_identity_member(
+        self,
+        db: AsyncSession,
+        provider_id: uuid.UUID,
+        provider_type: AuthProviderType | str,
+        provider_user_id: str,
+        identity_data: dict[str, Any] | None = None,
+    ):
+        from app.models.org import OrgMember
+
+        for field, lookup_value in self._identity_lookup_chain(provider_type, provider_user_id, identity_data):
+            column = getattr(OrgMember, field)
+            member_result = await db.execute(
+                select(OrgMember).where(
+                    OrgMember.provider_id == provider_id,
+                    OrgMember.status == "active",
+                    column == lookup_value,
+                )
+            )
+            member = member_result.scalar_one_or_none()
+            if member:
+                return member
+
+        return None
+
     async def link_identity(
         self,
         db: AsyncSession,
         user_id: str,
-        provider_type: str,
+        provider_type: AuthProviderType | str,
         provider_user_id: str,
         identity_data: dict[str, Any] | None = None,
         tenant_id: str | None = None,
@@ -227,61 +355,37 @@ class SSOService:
         from app.models.org import OrgMember
 
         # Get or create provider
-        query = select(IdentityProvider).where(
-            IdentityProvider.provider_type == provider_type,
-            IdentityProvider.tenant_id == tenant_id
-        )
-            
-        result = await db.execute(query)
-        provider = result.scalar_one_or_none()
+        provider = await get_preferred_identity_provider(db, provider_type, tenant_id)
 
         if not provider:
             raise ValueError(f"Provider {provider_type} not found for tenant {tenant_id}")
 
         uid = uuid.UUID(user_id) if isinstance(user_id, str) else user_id
 
-        # Extract the raw open_id from identity_data (raw provider response).
-        # For Feishu: raw_data has 'open_id' and 'union_id' as separate fields.
-        # For DingTalk: raw_data has 'openId' and 'unionId'.
-        # Storing open_id separately prevents duplicate user creation when the
-        # lookup key alternates between open_id and union_id across SSO sessions.
-        raw_open_id = None
-        if identity_data:
-            raw_open_id = (
-                identity_data.get("open_id")      # Feishu
-                or identity_data.get("openId")    # DingTalk
-            )
-
-        # Check if OrgMember already exists for this provider user.
-        # Search across unionid, external_id, and open_id to handle the case where
-        # the lookup key differs between sync (uses user_id/employee_id as external_id)
-        # and SSO (uses union_id or open_id as provider_user_id).
-        conditions = [
-            OrgMember.unionid == provider_user_id,
-            OrgMember.external_id == provider_user_id,
-            OrgMember.open_id == provider_user_id,
-        ]
-        if raw_open_id and raw_open_id != provider_user_id:
-            # Also search by the actual open_id from raw data, in case the member
-            # was created with open_id as its primary key (e.g. from a previous SSO login)
-            conditions.append(OrgMember.open_id == raw_open_id)
-            conditions.append(OrgMember.external_id == raw_open_id)
-
-        member_query = select(OrgMember).where(
-            OrgMember.provider_id == provider.id,
-            OrgMember.status == "active",
-            or_(*conditions)
+        raw_union_id, raw_open_id, raw_external_id = self._extract_identity_ids(
+            provider_type, provider_user_id, identity_data
         )
-        member_result = await db.execute(member_query)
-        member = member_result.scalar_one_or_none()
+        member = await self._find_identity_member(
+            db,
+            provider.id,
+            provider_type,
+            provider_user_id,
+            identity_data,
+        )
 
         if member:
             # Always link user
             member.user_id = uid
 
-            # Fill in open_id if not already set — prevents future lookup misses
+            if raw_external_id and not member.external_id:
+                member.external_id = raw_external_id
+
             if raw_open_id and not member.open_id:
                 member.open_id = raw_open_id
+
+            if raw_union_id and member.unionid != raw_union_id:
+                if not member.unionid or member.unionid in {provider_user_id, member.open_id, member.external_id}:
+                    member.unionid = raw_union_id
 
             # Passive identity enrichment: update profile fields from SSO data.
             # OrgMember records created by org-sync may have placeholder values
@@ -331,12 +435,8 @@ class SSOService:
                 provider_id=provider.id,
                 user_id=uid,
                 tenant_id=tenant_id,
-                # For Feishu/DingTalk: external_id stores union_id (cross-app stable).
-                # open_id is stored separately so it can also be matched on next login.
-                external_id=provider_user_id,
-                unionid=provider_user_id if provider_type != "wecom" else None,
-                # Explicitly store the raw open_id so future SSO lookups can match on it
-                # even if the lookup key is union_id (and vice versa).
+                external_id=raw_external_id,
+                unionid=raw_union_id if provider_type != "wecom" else None,
                 open_id=raw_open_id,
             )
             db.add(member)
@@ -345,7 +445,7 @@ class SSOService:
         return member
 
     async def unlink_identity(
-        self, db: AsyncSession, user_id: str, provider_type: str, tenant_id: str | None = None
+        self, db: AsyncSession, user_id: str, provider_type: AuthProviderType | str, tenant_id: str | None = None
     ) -> bool:
         """Unlink an external identity (OrgMember) from a user.
 
@@ -361,12 +461,7 @@ class SSOService:
         from app.models.org import OrgMember
 
         # Get provider
-        query = select(IdentityProvider).where(IdentityProvider.provider_type == provider_type)
-        if tenant_id:
-            query = query.where(IdentityProvider.tenant_id == tenant_id)
-            
-        result = await db.execute(query)
-        provider = result.scalar_one_or_none()
+        provider = await get_preferred_identity_provider(db, provider_type, tenant_id)
 
         if not provider:
             return False
@@ -390,7 +485,12 @@ class SSOService:
         return True
 
     async def check_duplicate_identity(
-        self, db: AsyncSession, provider_type: str, provider_user_id: str, tenant_id: str | None = None
+        self,
+        db: AsyncSession,
+        provider_type: AuthProviderType | str,
+        provider_user_id: str,
+        tenant_id: str | None = None,
+        identity_data: dict[str, Any] | None = None,
     ) -> User | None:
         """Check if an external identity is already linked to another user.
 
@@ -403,7 +503,13 @@ class SSOService:
         Returns:
             Existing user if identity is already linked, None otherwise
         """
-        return await self.resolve_user_identity(db, provider_user_id, provider_type, tenant_id)
+        return await self.resolve_user_identity(
+            db,
+            provider_user_id,
+            provider_type,
+            tenant_id,
+            identity_data=identity_data,
+        )
 
     async def validate_sso_enablement(self, db: AsyncSession, tenant_id: uuid.UUID) -> bool:
         """Check if SSO can be enabled for this tenant under IP restrictions.
@@ -436,8 +542,8 @@ class SSOService:
         # IP Address: only ONE tenant in the whole system can have SSO enabled.
         # Check if any *other* tenant has an active SSO-enabled provider.
         query = select(IdentityProvider).where(
-            IdentityProvider.sso_login_enabled == True,
-            IdentityProvider.is_active == True,
+            IdentityProvider.sso_login_enabled.is_(True),
+            IdentityProvider.is_active.is_(True),
             IdentityProvider.tenant_id != tenant_id,
         )
         result = await db.execute(query)
