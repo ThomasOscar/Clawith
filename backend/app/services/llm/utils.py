@@ -99,8 +99,8 @@ def convert_chat_messages_to_llm_format(messages) -> list[dict]:
         if msg.role == "tool_call":
             try:
                 tc_data = _json.loads(msg.content)
-                tc_name = tc_data.get("name", "unknown")
-                tc_args = tc_data.get("args", {})
+                tc_name = tc_data.get("name") or tc_data.get("tool_name", "unknown")
+                tc_args = tc_data.get("args") or tc_data.get("arguments", {})
                 tc_result = tc_data.get("result", "")
                 tc_id = f"call_{msg.id}"  # synthetic tool_call_id
 
